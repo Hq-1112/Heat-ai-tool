@@ -18,7 +18,7 @@ except Exception:
     GEMINI_API_KEY = None
 
 if genai is not None and GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY, transport='rest')
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # 设置页面配置
 st.set_page_config(
@@ -526,7 +526,7 @@ with col_ai:
                 response = model.generate_content(
                     prompt,
                     stream=True,
-                    request_options={"timeout": 20}
+                    request_options={"timeout": 80}
                 )
                 started_output = False
                 for chunk in response:
@@ -543,17 +543,17 @@ with col_ai:
                 status_placeholder = st.empty()
                 ai_output_placeholder = st.empty()
                 progress_bar = st.progress(5, text="正在初始化分析任务...")
-                status_placeholder.info("正在连接模型并准备生成讲解，请稍候...")
+                status_placeholder.info("最多等80秒，请耐心，出不来自然会报错")
                 ai_reply_text = ""
                 for progress_value, progress_text in [
                     (10, "正在整理循环参数..."),
                     (20, "正在连接 Gemini 模型..."),
-                    (30, "模型请求已发送，等待首个输出..."),
+                    (30, "模型请求已发送，最多等80秒，请耐心，出不来自然会报错"),
                 ]:
                     progress_bar.progress(progress_value, text=progress_text)
                     time.sleep(0.15)
                 try:
-                    progress_bar.progress(35, text="已连接 gemini-2.5-flash，等待首个输出...")
+                    progress_bar.progress(35, text="已连接 gemini-2.5-flash，最多等80秒，请耐心，出不来自然会报错")
                     ai_reply_text = st.write_stream(stream_ai_reply("gemini-2.5-flash"))
                 except Exception:
                     st.warning("✨ 2.5版本今日免费额度已满，已自动为您切换至 3.1 Flash Lite 模型继续分析！")
