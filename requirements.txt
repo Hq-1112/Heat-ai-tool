@@ -1,0 +1,6 @@
+streamlit
+numpy
+plotly
+pandas
+CoolProp
+google-generativeai
