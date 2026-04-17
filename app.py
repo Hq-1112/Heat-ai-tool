@@ -106,6 +106,7 @@ dome_line_style = dome_line_style_map[dome_line_style_label]
 dome_line_width = st.sidebar.slider("饱和罩线宽", min_value=0.5, max_value=4.0, value=1.5, step=0.1)
 dome_opacity = st.sidebar.slider("饱和罩透明度", min_value=0.1, max_value=1.0, value=0.8, step=0.05)
 dome_points = st.sidebar.slider("饱和罩采样点数", min_value=80, max_value=600, value=300, step=20)
+process_points = st.sidebar.slider("循环过程采样点数", min_value=50, max_value=300, value=120, step=10)
 
 # 中间压力输入（仅双级压缩）
 if cycle_type == "带经济器的双级压缩循环":
@@ -269,7 +270,8 @@ def generate_saturation_dome_data(refrigerant, num_points=300):
     T_crit = PropsSI('Tcrit', refrigerant)
 
     # 避免端点附近数值不稳定
-    T_range = np.linspace(T_triple + 1e-3, T_crit - 1e-3, num_points)
+    t_normalized = np.linspace(0, 1, num_points)
+    T_range = T_crit - (T_crit - T_triple - 1e-3) * (1 - t_normalized)**3
 
     p_sat = []
     h_liquid = []
@@ -306,6 +308,293 @@ def generate_saturation_dome_data(refrigerant, num_points=300):
     }
 
 
+def _init_curve(name):
+    return {"name": name, "P": [], "T_c": [], "h": [], "s": []}
+
+
+def _append_curve_point(curve, p_val, t_k, h_val, s_val):
+    if (
+        np.isfinite(p_val) and p_val > 0 and
+        np.isfinite(t_k) and
+        np.isfinite(h_val) and
+        np.isfinite(s_val)
+    ):
+        curve["P"].append(p_val)
+        curve["T_c"].append(t_k - 273.15)
+        curve["h"].append(h_val)
+        curve["s"].append(s_val)
+
+
+def get_process_path(state1, state2, process_type, refrigerant, num_points=50):
+    """基于CoolProp计算单个过程段的密集轨迹点。"""
+    path = {"P": [], "T": [], "T_c": [], "h": [], "s": []}
+    sample_count = max(50, num_points)
+
+    def append_point(p_val, t_k, h_val, s_val):
+        if (
+            np.isfinite(p_val) and p_val > 0 and
+            np.isfinite(t_k) and
+            np.isfinite(h_val) and
+            np.isfinite(s_val)
+        ):
+            path["P"].append(p_val)
+            path["T"].append(t_k)
+            path["T_c"].append(t_k - 273.15)
+            path["h"].append(h_val)
+            path["s"].append(s_val)
+
+    if process_type == "isentropic":
+        s_const = state1["s (J/kg·K)"]
+        h_samples = np.linspace(state1["h (J/kg)"], state2["h (J/kg)"], sample_count)
+        for h_val in h_samples:
+            try:
+                p_val = PropsSI('P', 'S', s_const, 'H', h_val, refrigerant)
+                t_k = PropsSI('T', 'S', s_const, 'H', h_val, refrigerant)
+                s_val = PropsSI('S', 'P', p_val, 'H', h_val, refrigerant)
+                append_point(p_val, t_k, h_val, s_val)
+            except Exception:
+                continue
+
+    elif process_type == "isobaric":
+        p_const = state1["P (Pa)"]
+        h_start = state1["h (J/kg)"]
+        h_end = state2["h (J/kg)"]
+        h_samples = np.linspace(h_start, h_end, sample_count)
+        for h_val in h_samples:
+            try:
+                t_k = PropsSI('T', 'P', p_const, 'H', h_val, refrigerant)
+                s_val = PropsSI('S', 'P', p_const, 'H', h_val, refrigerant)
+                append_point(p_const, t_k, h_val, s_val)
+            except Exception:
+                continue
+
+    elif process_type == "isenthalpic":
+        h_const = state1["h (J/kg)"]
+        p_samples = np.linspace(state1["P (Pa)"], state2["P (Pa)"], sample_count)
+        for p_val in p_samples:
+            try:
+                t_k = PropsSI('T', 'P', p_val, 'H', h_const, refrigerant)
+                s_val = PropsSI('S', 'P', p_val, 'H', h_const, refrigerant)
+                append_point(p_val, t_k, h_const, s_val)
+            except Exception:
+                continue
+
+    return path
+
+
+def sample_isobaric_curve_by_h(name, p_const, h_start, h_end, refrigerant, points_per_process):
+    """等压过程：按焓插值，用(P,H)求T和S。"""
+    curve = _init_curve(name)
+    h_samples = np.linspace(h_start, h_end, max(50, points_per_process))
+    for h_val in h_samples:
+        try:
+            t_k = PropsSI('T', 'P', p_const, 'H', h_val, refrigerant)
+            s_val = PropsSI('S', 'P', p_const, 'H', h_val, refrigerant)
+            _append_curve_point(curve, p_const, t_k, h_val, s_val)
+        except Exception:
+            continue
+    return curve
+
+
+def sample_isentropic_curve_by_h(name, s_const, h_start, h_end, refrigerant, points_per_process):
+    """等熵过程：按焓插值，用(S,H)求P和T。"""
+    curve = _init_curve(name)
+    h_samples = np.linspace(h_start, h_end, max(50, points_per_process))
+    for h_val in h_samples:
+        try:
+            p_val = PropsSI('P', 'S', s_const, 'H', h_val, refrigerant)
+            t_k = PropsSI('T', 'S', s_const, 'H', h_val, refrigerant)
+            s_val = PropsSI('S', 'P', p_val, 'H', h_val, refrigerant)
+            _append_curve_point(curve, p_val, t_k, h_val, s_val)
+        except Exception:
+            continue
+    return curve
+
+
+def sample_isenthalpic_curve_by_p(name, h_const, p_start, p_end, refrigerant, points_per_process):
+    """等焓过程：按压力插值，用(P,H)求T和S。"""
+    curve = _init_curve(name)
+    p_samples = np.linspace(p_start, p_end, max(50, points_per_process))
+    for p_val in p_samples:
+        try:
+            t_k = PropsSI('T', 'P', p_val, 'H', h_const, refrigerant)
+            s_val = PropsSI('S', 'P', p_val, 'H', h_const, refrigerant)
+            _append_curve_point(curve, p_val, t_k, h_const, s_val)
+        except Exception:
+            continue
+    return curve
+
+
+def build_single_stage_process_curves(states, refrigerant, points_per_process=120):
+    """单级循环：所有可变焓过程均按焓插值并用CoolProp反算轨迹。"""
+    state_map = {state["点"]: state for state in states}
+    required_points = [1, 2, 3, 4]
+    if any(point not in state_map for point in required_points):
+        return []
+
+    st1, st2, st3, st4 = (state_map[1], state_map[2], state_map[3], state_map[4])
+
+    curves = [
+        sample_isentropic_curve_by_h(
+            name="1→2 等熵压缩",
+            s_const=st1["s (J/kg·K)"],
+            h_start=st1["h (J/kg)"],
+            h_end=st2["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="2→3 等压冷凝",
+            p_const=st2["P (Pa)"],
+            h_start=st2["h (J/kg)"],
+            h_end=st3["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isenthalpic_curve_by_p(
+            name="3→4 等焓节流",
+            h_const=st3["h (J/kg)"],
+            p_start=st3["P (Pa)"],
+            p_end=st4["P (Pa)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="4→1 等压蒸发",
+            p_const=st4["P (Pa)"],
+            h_start=st4["h (J/kg)"],
+            h_end=st1["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        )
+    ]
+
+    return [curve for curve in curves if len(curve["h"]) >= 2]
+
+
+def build_two_stage_process_curves(states, refrigerant, points_per_process=120):
+    """双级循环：沿各过程物理约束生成由CoolProp驱动的密集轨迹。"""
+    state_map = {state["点"]: state for state in states}
+    required_points = [1, 2, 3, 4, 5, 6, 7, 8]
+    if any(point not in state_map for point in required_points):
+        return []
+
+    st1 = state_map[1]
+    st2 = state_map[2]
+    st3 = state_map[3]
+    st4 = state_map[4]
+    st5 = state_map[5]
+    st6 = state_map[6]
+    st7 = state_map[7]
+    st8 = state_map[8]
+
+    curves = [
+        sample_isentropic_curve_by_h(
+            name="1→2 低压级等熵压缩",
+            s_const=st1["s (J/kg·K)"],
+            h_start=st1["h (J/kg)"],
+            h_end=st2["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="2→6 中压等压混合",
+            p_const=st2["P (Pa)"],
+            h_start=st2["h (J/kg)"],
+            h_end=st6["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isentropic_curve_by_h(
+            name="6→7 高压级等熵压缩",
+            s_const=st6["s (J/kg·K)"],
+            h_start=st6["h (J/kg)"],
+            h_end=st7["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="7→3 等压冷凝",
+            p_const=st7["P (Pa)"],
+            h_start=st7["h (J/kg)"],
+            h_end=st3["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isenthalpic_curve_by_p(
+            name="3→4 第一节流阀等焓",
+            h_const=st3["h (J/kg)"],
+            p_start=st3["P (Pa)"],
+            p_end=st4["P (Pa)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="4→5 经济器等压蒸发",
+            p_const=st4["P (Pa)"],
+            h_start=st4["h (J/kg)"],
+            h_end=st5["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="5→6 中压等压混合",
+            p_const=st5["P (Pa)"],
+            h_start=st5["h (J/kg)"],
+            h_end=st6["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isenthalpic_curve_by_p(
+            name="液支路→8 第二节流阀等焓",
+            h_const=st8["h (J/kg)"],
+            p_start=st4["P (Pa)"],
+            p_end=st8["P (Pa)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        ),
+        sample_isobaric_curve_by_h(
+            name="8→1 等压蒸发",
+            p_const=st8["P (Pa)"],
+            h_start=st8["h (J/kg)"],
+            h_end=st1["h (J/kg)"],
+            refrigerant=refrigerant,
+            points_per_process=points_per_process
+        )
+    ]
+
+    return [curve for curve in curves if len(curve["h"]) >= 2]
+
+
+def get_process_trace_style(process_name, cycle_type):
+    """根据过程名称返回统一的颜色、线型和图例分组。"""
+    if cycle_type == "单级压缩循环":
+        mapping = {
+            "1→2 等熵压缩": {"color": "#1f77b4", "dash": "solid", "group": "压缩"},
+            "2→3 等压冷凝": {"color": "#d62728", "dash": "solid", "group": "冷凝"},
+            "3→4 等焓节流": {"color": "#ff7f0e", "dash": "solid", "group": "节流"},
+            "4→1 等压蒸发": {"color": "#2ca02c", "dash": "solid", "group": "蒸发"}
+        }
+        return mapping.get(process_name, {"color": "#7f7f7f", "dash": "solid", "group": "其它"})
+
+    # 双级循环：主回路与支路使用不同视觉语义
+    if "等熵压缩" in process_name:
+        return {"color": "#1f77b4", "dash": "solid", "group": "压缩"}
+    if "等压冷凝" in process_name:
+        return {"color": "#d62728", "dash": "solid", "group": "冷凝"}
+    if "等焓" in process_name:
+        return {"color": "#ff7f0e", "dash": "solid", "group": "节流"}
+    if "等压蒸发" in process_name and "经济器" in process_name:
+        return {"color": "#17becf", "dash": "solid", "group": "经济器蒸发"}
+    if "等压蒸发" in process_name:
+        return {"color": "#2ca02c", "dash": "solid", "group": "蒸发器蒸发"}
+    if "中压等压混合" in process_name:
+        return {"color": "#9467bd", "dash": "dot", "group": "中压混合"}
+    if "液支路" in process_name:
+        return {"color": "#8c564b", "dash": "dashdot", "group": "液体支路"}
+    return {"color": "#7f7f7f", "dash": "solid", "group": "其它"}
+
+
 # 主界面显示
 col_main, col_ai = st.columns([6, 4], gap="large")
 
@@ -336,6 +625,26 @@ with col_main:
         # 准备状态点数据
         h_values = [state["h (J/kg)"] for state in states]
         p_values = [state["P (Pa)"] for state in states]
+        process_paths = []
+        if cycle_type == "单级压缩循环":
+            process_specs = [
+                (0, 1, "isentropic", "1→2 等熵压缩"),
+                (1, 2, "isobaric", "2→3 等压冷凝"),
+                (2, 3, "isenthalpic", "3→4 等焓节流"),
+                (3, 0, "isobaric", "4→1 等压蒸发")
+            ]
+            for start_idx, end_idx, process_type, process_name in process_specs:
+                path = get_process_path(
+                    states[start_idx],
+                    states[end_idx],
+                    process_type,
+                    refrigerant,
+                    num_points=process_points
+                )
+                path["name"] = process_name
+                process_paths.append(path)
+        else:
+            process_paths = build_two_stage_process_curves(states, refrigerant, points_per_process=process_points)
 
         # 创建图形
         fig_ph = go.Figure()
@@ -361,14 +670,27 @@ with col_main:
                 opacity=dome_opacity
             ))
 
+        if process_paths:
+            for curve in process_paths:
+                style = get_process_trace_style(curve["name"], cycle_type)
+                fig_ph.add_trace(go.Scatter(
+                    x=curve["h"],
+                    y=curve["P"],
+                    mode='lines',
+                    name=curve["name"],
+                    legendgroup=style["group"],
+                    line=dict(width=2.5, color=style["color"], dash=style["dash"]),
+                    hovertemplate='P: %{y:.2e} Pa<br>h: %{x:.2f} J/kg<br>s: %{customdata[0]:.2f} J/kg·K<br>T: %{customdata[1]:.2f} °C',
+                    customdata=np.column_stack((curve["s"], curve["T_c"]))
+                ))
+
         # 添加循环状态点
         fig_ph.add_trace(go.Scatter(
             x=h_values,
             y=p_values,
-            mode='markers+lines',
-            name='循环状态点',
+            mode='markers',
+            name='状态点',
             marker=dict(size=8, color='green'),
-            line=dict(width=2, color='green'),
             hovertemplate=
                 '点 %{customdata[0]}<br>' +
                 'P: %{y:.2e} Pa<br>' +
@@ -423,14 +745,27 @@ with col_main:
                 opacity=dome_opacity
             ))
 
+        if process_paths:
+            for curve in process_paths:
+                style = get_process_trace_style(curve["name"], cycle_type)
+                fig_ts.add_trace(go.Scatter(
+                    x=curve["s"],
+                    y=curve["T_c"],
+                    mode='lines',
+                    name=curve["name"],
+                    legendgroup=style["group"],
+                    line=dict(width=2.5, color=style["color"], dash=style["dash"]),
+                    hovertemplate='T: %{y:.2f} °C<br>s: %{x:.2f} J/kg·K<br>P: %{customdata[0]:.2e} Pa<br>h: %{customdata[1]:.2f} J/kg',
+                    customdata=np.column_stack((curve["P"], curve["h"]))
+                ))
+
         # 添加循环状态点
         fig_ts.add_trace(go.Scatter(
             x=s_values,
             y=[T - 273.15 for T in T_values],  # 转换为°C
-            mode='markers+lines',
-            name='循环状态点',
+            mode='markers',
+            name='状态点',
             marker=dict(size=8, color='green'),
-            line=dict(width=2, color='green'),
             hovertemplate=
                 '点 %{customdata[0]}<br>' +
                 'T: %{y:.2f} °C<br>' +
