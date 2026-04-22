@@ -888,14 +888,11 @@ with col_ai:
                     progress_bar.progress(progress_value, text=progress_text)
                     time.sleep(0.15)
                 try:
-                    progress_bar.progress(35, text="已连接 gemini-2.5-flash，最多等80秒，请耐心，出不来自然会报错")
-                    ai_reply_text = st.write_stream(stream_ai_reply("gemini-2.5-flash"))
-                except Exception:
-                    st.warning("✨ 2.5版本今日免费额度已满，已自动为您切换至 3.1 Flash Lite 模型继续分析！")
-                    progress_bar.progress(25, text="正在切换至 gemini-3.1-flash-lite-preview...")
-                    status_placeholder.info("主模型不可用，正在使用高额度模型继续生成...")
-                    time.sleep(0.1)
+                    progress_bar.progress(35, text="已连接 gemini-3.1-flash-lite，最多等80秒，请耐心，出不来自然会报错")
                     ai_reply_text = st.write_stream(stream_ai_reply("gemini-3.1-flash-lite-preview"))
+                except Exception:
+                    st.error("Gemini 模型请求失败，请检查 API 配置或稍后重试。")
+                    progress_bar.progress(0, text="模型请求失败")
 
                 if isinstance(ai_reply_text, str) and ai_reply_text.strip():
                     progress_bar.progress(100, text="分析完成")
